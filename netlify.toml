@@ -1,0 +1,16 @@
+# Next.js on Netlify — uses @netlify/plugin-nextjs (must be in dependencies).
+# https://docs.netlify.com/build/frameworks/framework-setup-guides/nextjs/overview/
+#
+# If you see Netlify’s generic "Page not found" at the site root:
+# 1) Push this file + latest package.json, then trigger "Clear cache and deploy".
+# 2) Site settings → Build & deploy → leave "Publish directory" EMPTY (do not use .next/out/public).
+# 3) Open the deploy log; the build must finish green. Red build = no app is deployed.
+
+[build]
+  command = "npm run build"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
