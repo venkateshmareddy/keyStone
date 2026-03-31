@@ -1,8 +1,11 @@
 import type { NextConfig } from "next";
 
+// Netlify’s Next adapter expects `output: "standalone"`. Vercel uses its own bundling;
+// forcing standalone there is unnecessary and can cause subtle issues, so only enable on Netlify CI.
+const isNetlifyBuild = process.env.NETLIFY === "true";
+
 const nextConfig: NextConfig = {
-  // Required by @netlify/plugin-nextjs v5 (expects `.next/standalone` after build)
-  output: "standalone",
+  ...(isNetlifyBuild ? { output: "standalone" as const } : {}),
   experimental: {
     serverActions: {
       bodySizeLimit: "4mb",
