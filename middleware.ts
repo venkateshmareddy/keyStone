@@ -2,11 +2,19 @@ import { getToken } from "next-auth/jwt";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function middleware(req: NextRequest) {
-  const token = await getToken({
-    req,
-    secret: process.env.AUTH_SECRET,
-    secureCookie: process.env.NODE_ENV === "production",
-  });
+  const secret = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET;
+  let token: Awaited<ReturnType<typeof getToken>> = null;
+  if (secret) {
+    try {
+      token = await getToken({
+        req,
+        secret,
+        secureCookie: process.env.NODE_ENV === "production",
+      });
+    } catch {
+      token = null;
+    }
+  }
 
   const path = req.nextUrl.pathname;
 

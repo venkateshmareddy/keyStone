@@ -1,13 +1,15 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { verifyPassword } from "@/lib/password";
 import {
   assertNotRateLimited,
   clearRateLimit,
   registerFailure,
 } from "@/lib/rate-limit";
 
+const authSecret = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET;
+
 export const { handlers, signIn, signOut, auth } = NextAuth({
+  ...(authSecret ? { secret: authSecret } : {}),
   session: { strategy: "jwt", maxAge: 30 * 24 * 60 * 60 },
   pages: { signIn: "/login" },
   trustHost: true,
@@ -31,7 +33,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           throw new Error(`Too many attempts. Retry in ${limited.retryAfter}s.`);
         }
 
-        const { prisma } = await import("@/lib/db");
+        const [{ prisma }, { verifyPassword }] = await Promise.all([
+          import("@/lib/db"),
+          import("@/lib/password"),
+        ]);
         const user = await prisma.user.findUnique({ where: { email } });
         if (!user || !(await verifyPassword(password, user.passwordHash))) {
           registerFailure(key);
