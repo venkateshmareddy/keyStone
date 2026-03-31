@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum NoteType {
+  NOTE
+  SECRET
+  COMMAND
+  FILE
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  categories Category[]
+}
+
+model Category {
+  id     String @id @default(uuid()) @db.Uuid
+  name   String
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notes  Note[]
+
+  @@index([userId])
+}
+
+model Note {
+  id         String   @id @default(uuid()) @db.Uuid
+  title      String
+  content    String   @default("")
+  type       NoteType @default(NOTE)
+  categoryId String   @map("category_id") @db.Uuid
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  isFavorite Boolean  @default(false) @map("is_favorite")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  secret   Secret?
+  files    File[]
+  noteTags NoteTag[]
+
+  @@index([categoryId])
+  @@index([updatedAt(sort: Desc)])
+}
+
+model Secret {
+  id            String @id @default(uuid()) @db.Uuid
+  noteId        String @unique @map("note_id") @db.Uuid
+  note          Note   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  encryptedData String @map("encrypted_data") @db.Text
+}
+
+model File {
+  id      String @id @default(uuid()) @db.Uuid
+  noteId  String @map("note_id") @db.Uuid
+  note    Note   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  fileUrl String @map("file_url")
+
+  @@index([noteId])
+}
+
+model Tag {
+  id       String    @id @default(uuid()) @db.Uuid
+  name     String    @unique
+  noteTags NoteTag[]
+}
+
+model NoteTag {
+  noteId String @map("note_id") @db.Uuid
+  tagId  String @map("tag_id") @db.Uuid
+  note   Note   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, tagId])
+  @@index([tagId])
+}
