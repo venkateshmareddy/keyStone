@@ -1,0 +1,63 @@
+version: '3.9'
+
+services:
+  # ── PostgreSQL ───────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: keystone-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-keystone}
+      POSTGRES_USER:     ${POSTGRES_USER:-keystone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro   # auto-run on first start
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-keystone} -d ${POSTGRES_DB:-keystone}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── API server ───────────────────────────────────────────
+  api:
+    build:
+      context: ./src/server
+      dockerfile: Dockerfile
+    container_name: keystone-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV:          production
+      PORT:              3001
+      POSTGRES_HOST:     db
+      POSTGRES_PORT:     5432
+      POSTGRES_DB:       ${POSTGRES_DB:-keystone}
+      POSTGRES_USER:     ${POSTGRES_USER:-keystone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      API_KEY:           ${API_KEY}
+      ENCRYPTION_KEY:    ${ENCRYPTION_KEY}
+      ALLOWED_ORIGINS:   ${ALLOWED_ORIGINS:-http://localhost:3000}
+    ports:
+      - "${API_PORT:-3001}:3001"
+
+  # ── React frontend (production build served via nginx) ───
+  client:
+    build:
+      context: ./src/client
+      dockerfile: Dockerfile
+    container_name: keystone-client
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:3001}
+    ports:
+      - "${CLIENT_PORT:-3000}:80"
+
+volumes:
+  db_data:
