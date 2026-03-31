@@ -78,6 +78,10 @@ web_modules/
 .next
 out
 
+# Serwist (generated on build / deploy)
+public/sw*
+public/swe-worker*
+
 # Local uploads (keep directory)
 public/uploads/*
 !public/uploads/.gitkeep

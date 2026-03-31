@@ -1,7 +1,21 @@
 import type { NextConfig } from "next";
+import withSerwistInit from "@serwist/next";
+import { randomUUID } from "node:crypto";
 
-// Netlify’s Next adapter expects `output: "standalone"`. Vercel uses its own bundling;
-// forcing standalone there is unnecessary and can cause subtle issues, so only enable on Netlify CI.
+const revision =
+  process.env.VERCEL_GIT_COMMIT_SHA ??
+  process.env.NETLIFY_COMMIT_REF ??
+  process.env.GITHUB_SHA ??
+  randomUUID();
+
+const withSerwist = withSerwistInit({
+  swSrc: "app/sw.ts",
+  swDest: "public/sw.js",
+  disable: process.env.NODE_ENV === "development",
+  additionalPrecacheEntries: [{ url: "/offline", revision }],
+});
+
+// Netlify’s Next adapter expects `output: "standalone"`. Vercel uses its own bundling.
 const isNetlifyBuild = process.env.NETLIFY === "true";
 
 const nextConfig: NextConfig = {
@@ -11,7 +25,6 @@ const nextConfig: NextConfig = {
       bodySizeLimit: "4mb",
     },
   },
-  // Standalone must ship Prisma engines anywhere the client runs (API + not only /api).
   outputFileTracingIncludes: {
     "/*": [
       "./node_modules/.prisma/client/**/*",
@@ -20,4 +33,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default withSerwist(nextConfig);
