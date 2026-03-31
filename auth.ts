@@ -1,6 +1,5 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { prisma } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
 import {
   assertNotRateLimited,
@@ -32,6 +31,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           throw new Error(`Too many attempts. Retry in ${limited.retryAfter}s.`);
         }
 
+        const { prisma } = await import("@/lib/db");
         const user = await prisma.user.findUnique({ where: { email } });
         if (!user || !(await verifyPassword(password, user.passwordHash))) {
           registerFailure(key);

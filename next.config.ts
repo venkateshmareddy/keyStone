@@ -8,8 +8,9 @@ const nextConfig: NextConfig = {
       bodySizeLimit: "4mb",
     },
   },
+  // Standalone must ship Prisma engines anywhere the client runs (API + not only /api).
   outputFileTracingIncludes: {
-    "/api/**/*": [
+    "/*": [
       "./node_modules/.prisma/client/**/*",
       "./node_modules/@prisma/client/**/*",
     ],
