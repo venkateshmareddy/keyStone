@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useDebounce } from "@/hooks/use-debounce";
 import type { SecretPayload } from "@/lib/validation";
 import { useDashboardStore } from "@/stores/dashboard-store";
-import type { NoteType } from "@/types";
+import type { NoteListItem, NoteType } from "@/types";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, Save, Star, Trash2 } from "lucide-react";
 import dynamic from "next/dynamic";
@@ -35,21 +35,34 @@ type Props = {
   categoryId: string | null;
 };
 
+function normalizeTagNames(tagsText: string): string[] {
+  return tagsText
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function tagSignature(names: string[]): string {
+  return [...names].sort((a, b) => a.localeCompare(b)).join("\0");
+}
+
+/** Resolve tag names to ids in parallel (one round-trip each, but concurrent). */
 async function resolveTagIds(names: string[]): Promise<string[]> {
-  const ids: string[] = [];
-  for (const raw of names) {
-    const name = raw.trim();
-    if (!name) continue;
-    const res = await fetch("/api/tags", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) continue;
-    const tag = (await res.json()) as { id: string };
-    ids.push(tag.id);
-  }
-  return ids;
+  const unique = [...new Set(names.map((n) => n.trim()).filter(Boolean))];
+  if (unique.length === 0) return [];
+  const results = await Promise.all(
+    unique.map(async (name) => {
+      const res = await fetch("/api/tags", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) return null;
+      const tag = (await res.json()) as { id: string };
+      return tag.id;
+    }),
+  );
+  return results.filter((id): id is string => id != null);
 }
 
 function serialize(
@@ -88,6 +101,7 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
   const skipSync = useRef(true);
   const lastSynced = useRef("");
   const hydratedId = useRef<string | null>(null);
+  const saveGeneration = useRef(0);
 
   useEffect(() => {
     if (!note) {
@@ -120,7 +134,7 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
   const debouncedTitle = useDebounce(title, 700);
   const debouncedContent = useDebounce(content, 700);
   const debouncedSecret = useDebounce(secret, 700);
-  const debouncedTagsText = useDebounce(tagsText, 900);
+  const debouncedTagsText = useDebounce(tagsText, 750);
 
   const { mutate: saveNote } = useMutation({
     mutationFn: async (body: Record<string, unknown>) => {
@@ -131,13 +145,23 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error("save failed");
-      return res.json() as Promise<{ detail: NoteDetail }>;
+      return res.json() as Promise<{
+        detail: NoteDetail;
+        listItem: NoteListItem;
+      }>;
     },
     onMutate: () => setSaveState("saving"),
     onSuccess: (data) => {
       setSaveState("saved");
       qc.setQueryData(["note", note?.id], data.detail);
-      qc.invalidateQueries({ queryKey: ["notes"] });
+      qc.setQueriesData(
+        { queryKey: ["notes"], exact: false },
+        (old: NoteListItem[] | undefined) => {
+          if (!old) return old;
+          const li = data.listItem;
+          return old.map((n) => (n.id === li.id ? li : n));
+        },
+      );
       lastSynced.current = serialize(
         data.detail,
         data.detail.title,
@@ -169,17 +193,31 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
     );
     if (next === lastSynced.current) return;
 
+    const gen = ++saveGeneration.current;
     void (async () => {
-      const tagIds = await resolveTagIds(debouncedTagsText.split(","));
+      const nextNames = normalizeTagNames(debouncedTagsText);
+      const serverNames = note.tags.map((t) => t.name);
+      const tagsChanged =
+        tagSignature(nextNames) !== tagSignature(serverNames);
+
+      let tagIds: string[] | undefined;
+      if (tagsChanged) {
+        tagIds = await resolveTagIds(nextNames);
+        if (gen !== saveGeneration.current) return;
+      }
+
       const body: Record<string, unknown> = {
         title: debouncedTitle,
-        tagIds,
       };
+      if (tagIds !== undefined) {
+        body.tagIds = tagIds;
+      }
       if (note.type === "SECRET") {
         body.secretPayload = debouncedSecret;
       } else {
         body.content = debouncedContent;
       }
+      if (gen !== saveGeneration.current) return;
       saveNote(body);
     })();
   }, [
