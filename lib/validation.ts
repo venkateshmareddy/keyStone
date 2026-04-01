@@ -9,6 +9,8 @@ export const registerSchema = z.object({
 });
 
 export const categoryCreateSchema = z.object({
+  /** Client-generated UUID for offline-first creates */
+  id: z.string().uuid().optional(),
   name: z.string().min(1).max(200).trim(),
 });
 
@@ -28,6 +30,8 @@ export const secretPayloadSchema = z.object({
 export type SecretPayload = z.infer<typeof secretPayloadSchema>;
 
 export const noteCreateSchema = z.object({
+  /** Client-generated UUID for offline-first creates */
+  id: z.string().uuid().optional(),
   title: z.string().min(1).max(500).trim(),
   content: z.string().max(500_000).optional().default(""),
   type: noteTypeSchema.optional().default("NOTE"),
@@ -43,5 +47,7 @@ export const noteUpdateSchema = z.object({
   categoryId: z.string().uuid().optional(),
   isFavorite: z.boolean().optional(),
   tagIds: z.array(z.string().uuid()).optional(),
+  /** Resolved server-side via tag upsert when offline sync sends names */
+  tagNames: z.array(z.string().min(1).max(80).trim()).max(50).optional(),
   secretPayload: secretPayloadSchema.optional(),
 });

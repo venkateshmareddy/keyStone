@@ -3,6 +3,7 @@ import { encryptSecretPayload } from "@/lib/crypto-secrets";
 import { prisma } from "@/lib/db";
 import { serializeNoteDetail, serializeNoteListItem } from "@/lib/note-mappers";
 import { noteListInclude } from "@/lib/notes-search";
+import { tagIdsFromNames } from "@/lib/tag-upsert";
 import { noteUpdateSchema, secretPayloadSchema } from "@/lib/validation";
 import { NextResponse } from "next/server";
 
@@ -59,9 +60,15 @@ export async function PATCH(req: Request, { params }: Params) {
     type,
     categoryId,
     isFavorite,
-    tagIds,
     secretPayload: rawSecret,
+    tagNames,
+    tagIds: parsedTagIds,
   } = parsed.data;
+
+  const tagIds =
+    tagNames !== undefined
+      ? await tagIdsFromNames(prisma, tagNames)
+      : parsedTagIds;
 
   if (categoryId) {
     const cat = await prisma.category.findFirst({

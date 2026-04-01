@@ -61,8 +61,24 @@ export async function POST(req: Request) {
     );
   }
 
-  const { title, content, type, categoryId, tagIds, secretPayload: rawSecret } =
-    parsed.data;
+  const {
+    id: clientId,
+    title,
+    content,
+    type,
+    categoryId,
+    tagIds: inputTagIds,
+    secretPayload: rawSecret,
+  } = parsed.data;
+
+  const tagIds = inputTagIds;
+
+  if (clientId) {
+    const taken = await prisma.note.findFirst({ where: { id: clientId } });
+    if (taken) {
+      return NextResponse.json({ error: "Note id already exists" }, { status: 409 });
+    }
+  }
 
   const category = await prisma.category.findFirst({
     where: { id: categoryId, userId: user.id },
@@ -85,6 +101,7 @@ export async function POST(req: Request) {
     const note = await prisma.$transaction(async (tx) => {
       const created = await tx.note.create({
         data: {
+          ...(clientId ? { id: clientId } : {}),
           title,
           content: type === "SECRET" ? "" : content,
           type,

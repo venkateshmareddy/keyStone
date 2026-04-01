@@ -1,7 +1,7 @@
 "use client";
 
 import { CategorySidebar } from "@/components/dashboard/category-sidebar";
-import { NoteEditorPanel, type NoteDetail } from "@/components/dashboard/note-editor";
+import { NoteEditorPanel } from "@/components/dashboard/note-editor";
 import { NoteListPanel } from "@/components/dashboard/note-list";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,8 +11,24 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useDebounce } from "@/hooks/use-debounce";
+import { useNetworkStatus } from "@/hooks/use-network-status";
+import {
+  incrementCategoryNotes,
+  mergeNoteListItems,
+  putNoteDetailCache,
+  purgeNotesForCategory,
+  readCategoriesCache,
+  readNoteDetailCache,
+  readNotesCache,
+  removeCategoryCache,
+  replaceCategoriesCache,
+  replaceNoteListForCategory,
+  upsertCategoryCache,
+} from "@/lib/offline/cache";
+import { enqueueOutbox, outboxLength } from "@/lib/offline/outbox";
+import { drainOutbox } from "@/lib/offline/sync";
 import { useDashboardStore } from "@/stores/dashboard-store";
-import type { CategoryDTO, NoteListItem, NoteType } from "@/types";
+import type { CategoryDTO, NoteDetail, NoteListItem, NoteType } from "@/types";
 import {
   keepPreviousData,
   useMutation,
@@ -20,7 +36,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { signOut, useSession } from "next-auth/react";
-import { KeyRound, LogOut, Terminal, FileText, Paperclip } from "lucide-react";
+import { KeyRound, LogOut, Terminal, FileText, Paperclip, WifiOff } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 const typeOptions: { type: NoteType; label: string; icon: typeof FileText }[] =
@@ -34,6 +50,7 @@ const typeOptions: { type: NoteType; label: string; icon: typeof FileText }[] =
 export function DashboardApp() {
   const { data: session } = useSession();
   const qc = useQueryClient();
+  const online = useNetworkStatus();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const {
@@ -47,14 +64,41 @@ export function DashboardApp() {
   const debouncedSearch = useDebounce(search, 350);
   const [newOpen, setNewOpen] = useState(false);
 
+  const userId = session?.user?.id;
+
   const categoriesQuery = useQuery({
     queryKey: ["categories"],
     queryFn: async () => {
-      const res = await fetch("/api/categories");
-      if (!res.ok) throw new Error("categories");
-      return res.json() as Promise<CategoryDTO[]>;
+      const uid = session!.user!.id;
+      try {
+        const res = await fetch("/api/categories");
+        if (!res.ok) throw new Error("categories");
+        const data = (await res.json()) as CategoryDTO[];
+        await replaceCategoriesCache(uid, data);
+        return data;
+      } catch {
+        if (!navigator.onLine) {
+          const cached = await readCategoriesCache(uid);
+          if (cached.length) return cached;
+        }
+        throw new Error("categories");
+      }
     },
+    enabled: !!userId,
   });
+
+  useEffect(() => {
+    if (!online || !userId) return;
+    let cancelled = false;
+    void (async () => {
+      if ((await outboxLength(userId)) === 0) return;
+      await drainOutbox(userId);
+      if (!cancelled) await qc.invalidateQueries();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [online, userId, qc]);
 
   useEffect(() => {
     const list = categoriesQuery.data;
@@ -67,63 +111,141 @@ export function DashboardApp() {
   const notesQuery = useQuery({
     queryKey: ["notes", selectedCategoryId, debouncedSearch],
     queryFn: async () => {
+      const uid = session!.user!.id;
+      const cat = selectedCategoryId!;
       const sp = new URLSearchParams();
-      if (selectedCategoryId) sp.set("categoryId", selectedCategoryId);
+      sp.set("categoryId", cat);
       if (debouncedSearch.trim()) sp.set("q", debouncedSearch.trim());
-      const res = await fetch(`/api/notes?${sp.toString()}`);
-      if (!res.ok) throw new Error("notes");
-      return res.json() as Promise<NoteListItem[]>;
+      try {
+        const res = await fetch(`/api/notes?${sp.toString()}`);
+        if (!res.ok) throw new Error("notes");
+        const data = (await res.json()) as NoteListItem[];
+        await replaceNoteListForCategory(uid, cat, data);
+        return data;
+      } catch {
+        if (!navigator.onLine) {
+          return readNotesCache(uid, cat, debouncedSearch);
+        }
+        throw new Error("notes");
+      }
     },
-    enabled: !!selectedCategoryId,
+    enabled: !!userId && !!selectedCategoryId,
     placeholderData: keepPreviousData,
   });
 
   const noteQuery = useQuery({
     queryKey: ["note", selectedNoteId],
     queryFn: async () => {
-      const res = await fetch(`/api/notes/${selectedNoteId}`);
-      if (!res.ok) throw new Error("note");
-      return res.json() as Promise<NoteDetail>;
+      const uid = session!.user!.id;
+      const id = selectedNoteId!;
+      try {
+        const res = await fetch(`/api/notes/${id}`);
+        if (!res.ok) throw new Error("note");
+        const data = (await res.json()) as NoteDetail;
+        await putNoteDetailCache(uid, data);
+        return data;
+      } catch {
+        if (!navigator.onLine) {
+          const cached = await readNoteDetailCache(uid, id);
+          if (cached) return cached;
+        }
+        throw new Error("note");
+      }
     },
-    enabled: !!selectedNoteId,
+    enabled: !!userId && !!selectedNoteId,
   });
 
   const createCategory = useMutation({
     mutationFn: async (name: string) => {
+      const uid = session!.user!.id;
+      if (!navigator.onLine) {
+        const id = crypto.randomUUID();
+        const cat: CategoryDTO = { id, name, _count: { notes: 0 } };
+        await upsertCategoryCache(uid, cat);
+        await enqueueOutbox(uid, "createCategory", { id, name });
+        return cat;
+      }
       const res = await fetch("/api/categories", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
       if (!res.ok) throw new Error("create category");
-      return res.json() as Promise<CategoryDTO>;
+      const cat = (await res.json()) as CategoryDTO;
+      await upsertCategoryCache(uid, cat);
+      return cat;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["categories"] }),
+    onSuccess: (cat) => {
+      qc.setQueryData(["categories"], (old: CategoryDTO[] | undefined = []) => {
+        const next = [...old.filter((c) => c.id !== cat.id), cat];
+        next.sort((a, b) => a.name.localeCompare(b.name));
+        return next;
+      });
+    },
   });
 
   const renameCategory = useMutation({
     mutationFn: async ({ id, name }: { id: string; name: string }) => {
+      const uid = session!.user!.id;
+      if (!navigator.onLine) {
+        const rows = await readCategoriesCache(uid);
+        const prev = rows.find((c) => c.id === id);
+        if (!prev) throw new Error("rename");
+        const next = { ...prev, name };
+        await upsertCategoryCache(uid, next);
+        await enqueueOutbox(uid, "renameCategory", { id, name });
+        return next;
+      }
       const res = await fetch(`/api/categories/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
       if (!res.ok) throw new Error("rename");
+      const updated = (await res.json()) as CategoryDTO;
+      await upsertCategoryCache(uid, updated);
+      return updated;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["categories"] }),
+    onSuccess: (cat) => {
+      qc.setQueryData(["categories"], (old: CategoryDTO[] | undefined = []) => {
+        const next = old.map((c) => (c.id === cat.id ? cat : c));
+        next.sort((a, b) => a.name.localeCompare(b.name));
+        return next;
+      });
+    },
   });
 
   const deleteCategory = useMutation({
     mutationFn: async (id: string) => {
+      const uid = session!.user!.id;
+      if (!navigator.onLine) {
+        await purgeNotesForCategory(uid, id);
+        await removeCategoryCache(uid, id);
+        await enqueueOutbox(uid, "deleteCategory", { id });
+        return id;
+      }
       const res = await fetch(`/api/categories/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("delete");
+      await purgeNotesForCategory(uid, id);
+      await removeCategoryCache(uid, id);
+      return id;
     },
-    onSuccess: (_, id) => {
-      qc.invalidateQueries({ queryKey: ["categories"] });
-      qc.invalidateQueries({ queryKey: ["notes"] });
+    onSuccess: (id) => {
+      qc.setQueryData(["categories"], (old: CategoryDTO[] | undefined) =>
+        (old ?? []).filter((c) => c.id !== id),
+      );
+      qc.setQueriesData({ queryKey: ["notes"], exact: false }, (old) =>
+        Array.isArray(old)
+          ? (old as NoteListItem[]).filter((n) => n.categoryId !== id)
+          : old,
+      );
       if (selectedCategoryId === id) {
         setSelectedCategoryId(null);
         setSelectedNoteId(null);
+      }
+      if (navigator.onLine) {
+        qc.invalidateQueries({ queryKey: ["categories"] });
+        qc.invalidateQueries({ queryKey: ["notes"] });
       }
     },
   });
@@ -131,6 +253,58 @@ export function DashboardApp() {
   const createNote = useMutation({
     mutationFn: async (type: NoteType) => {
       if (!selectedCategoryId) throw new Error("no category");
+      const uid = session!.user!.id;
+      const sp =
+        type === "SECRET"
+          ? { secretPayload: { username: "", password: "", url: "", notes: "" } }
+          : {};
+      if (!navigator.onLine) {
+        const id = crypto.randomUUID();
+        const now = new Date().toISOString();
+        const listItem: NoteListItem = {
+          id,
+          title: "Untitled",
+          type,
+          isFavorite: false,
+          updatedAt: now,
+          categoryId: selectedCategoryId,
+          tags: [],
+        };
+        const detail: NoteDetail = {
+          id,
+          title: "Untitled",
+          content: "",
+          type,
+          isFavorite: false,
+          createdAt: now,
+          updatedAt: now,
+          categoryId: selectedCategoryId,
+          tags: [],
+          files: [],
+          ...(type === "SECRET"
+            ? {
+                secretPayload: {
+                  username: "",
+                  password: "",
+                  url: "",
+                  notes: "",
+                },
+              }
+            : {}),
+        };
+        await mergeNoteListItems(uid, [listItem]);
+        await putNoteDetailCache(uid, detail);
+        await incrementCategoryNotes(uid, selectedCategoryId, 1);
+        await enqueueOutbox(uid, "createNote", {
+          id,
+          title: "Untitled",
+          content: "",
+          type,
+          categoryId: selectedCategoryId,
+          ...(type === "SECRET" ? sp : {}),
+        });
+        return { listItem, detail };
+      }
       const res = await fetch("/api/notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -139,18 +313,42 @@ export function DashboardApp() {
           content: "",
           type,
           categoryId: selectedCategoryId,
-          ...(type === "SECRET"
-            ? { secretPayload: { username: "", password: "", url: "", notes: "" } }
-            : {}),
+          ...sp,
         }),
       });
       if (!res.ok) throw new Error("create note");
-      return res.json() as Promise<NoteListItem>;
+      const listItem = (await res.json()) as NoteListItem;
+      await mergeNoteListItems(uid, [listItem]);
+      return { listItem, detail: null as NoteDetail | null };
     },
-    onSuccess: (item) => {
-      qc.invalidateQueries({ queryKey: ["notes"] });
-      qc.invalidateQueries({ queryKey: ["categories"] });
-      setSelectedNoteId(item.id);
+    onSuccess: (result) => {
+      const { listItem, detail } = result;
+      if (detail) {
+        qc.setQueryData(["note", listItem.id], detail);
+        qc.setQueriesData({ queryKey: ["notes"], exact: false }, (old) => {
+          if (!Array.isArray(old)) return old;
+          const rows = old as NoteListItem[];
+          if (rows.length && rows[0].categoryId !== listItem.categoryId)
+            return old;
+          return [listItem, ...rows.filter((n) => n.id !== listItem.id)];
+        });
+        qc.setQueryData(
+          ["categories"],
+          (old: CategoryDTO[] | undefined = []) =>
+            old.map((c) =>
+              c.id === listItem.categoryId
+                ? {
+                    ...c,
+                    _count: { notes: (c._count?.notes ?? 0) + 1 },
+                  }
+                : c,
+            ),
+        );
+      } else {
+        qc.invalidateQueries({ queryKey: ["notes"] });
+        qc.invalidateQueries({ queryKey: ["categories"] });
+      }
+      setSelectedNoteId(listItem.id);
       setNewOpen(false);
     },
   });
@@ -185,12 +383,18 @@ export function DashboardApp() {
       />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-11 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-900/30 px-4">
-          <span className="text-sm text-zinc-400">
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
             signed in as{" "}
             <span className="font-medium text-zinc-200">
               {session?.user?.email}
             </span>
-            <span className="ml-3 text-zinc-600">
+            {!online ? (
+              <span className="flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-200/90">
+                <WifiOff className="size-3.5" />
+                Offline — notes saved on this device; syncs when you reconnect
+              </span>
+            ) : null}
+            <span className="text-zinc-600">
               ⌘N new · ⌘K search
             </span>
           </span>

@@ -6,29 +6,25 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { useDebounce } from "@/hooks/use-debounce";
+import {
+  listItemFromDetail,
+  mergeNoteListItems,
+  putNoteDetailCache,
+  removeNoteFromCache,
+  incrementCategoryNotes,
+} from "@/lib/offline/cache";
+import { applyPatchToDetail } from "@/lib/offline/local-patch";
+import { enqueueOutbox } from "@/lib/offline/outbox";
 import type { SecretPayload } from "@/lib/validation";
 import { useDashboardStore } from "@/stores/dashboard-store";
-import type { NoteListItem, NoteType } from "@/types";
+import type { CategoryDTO, NoteDetail, NoteListItem } from "@/types";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useSession } from "next-auth/react";
 import { Eye, EyeOff, Save, Star, Trash2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 
 const ReactMarkdown = dynamic(() => import("react-markdown"), { ssr: false });
-
-export type NoteDetail = {
-  id: string;
-  title: string;
-  content: string;
-  type: NoteType;
-  isFavorite: boolean;
-  createdAt: string;
-  updatedAt: string;
-  categoryId: string;
-  tags: { id: string; name: string }[];
-  files: { id: string; fileUrl: string }[];
-  secretPayload?: SecretPayload;
-};
 
 type Props = {
   note: NoteDetail | null;
@@ -87,6 +83,7 @@ function serialize(
 }
 
 export function NoteEditorPanel({ note, categoryId }: Props) {
+  const { data: session } = useSession();
   const { editorMode, setEditorMode, setSelectedNoteId } = useDashboardStore();
   const qc = useQueryClient();
 
@@ -139,16 +136,27 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
   const { mutate: saveNote } = useMutation({
     mutationFn: async (body: Record<string, unknown>) => {
       if (!note) throw new Error("no note");
+      const uid = session?.user?.id;
+      if (!uid) throw new Error("no session");
+      if (!navigator.onLine) {
+        const next = applyPatchToDetail(note, body);
+        await putNoteDetailCache(uid, next);
+        await mergeNoteListItems(uid, [listItemFromDetail(next)]);
+        await enqueueOutbox(uid, "patchNote", { noteId: note.id, body });
+        return {detail: next, listItem: listItemFromDetail(next) };
+      }
       const res = await fetch(`/api/notes/${note.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error("save failed");
-      return res.json() as Promise<{
+      const data = (await res.json()) as {
         detail: NoteDetail;
         listItem: NoteListItem;
-      }>;
+      };
+      await putNoteDetailCache(uid, data.detail);
+      return data;
     },
     onMutate: () => setSaveState("saving"),
     onSuccess: (data) => {
@@ -202,15 +210,21 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
 
       let tagIds: string[] | undefined;
       if (tagsChanged) {
-        tagIds = await resolveTagIds(nextNames);
-        if (gen !== saveGeneration.current) return;
+        if (navigator.onLine) {
+          tagIds = await resolveTagIds(nextNames);
+          if (gen !== saveGeneration.current) return;
+        }
       }
 
       const body: Record<string, unknown> = {
         title: debouncedTitle,
       };
-      if (tagIds !== undefined) {
-        body.tagIds = tagIds;
+      if (tagsChanged) {
+        if (navigator.onLine && tagIds !== undefined) {
+          body.tagIds = tagIds;
+        } else if (!navigator.onLine) {
+          body.tagNames = nextNames;
+        }
       }
       if (note.type === "SECRET") {
         body.secretPayload = debouncedSecret;
@@ -231,6 +245,7 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
 
   async function uploadFile(file: File) {
     if (!note || note.type !== "FILE") return;
+    if (!navigator.onLine) return;
     const fd = new FormData();
     fd.append("file", file);
     const res = await fetch(`/api/notes/${note.id}/files`, {
@@ -254,8 +269,35 @@ export function NoteEditorPanel({ note, categoryId }: Props) {
     ) {
       return;
     }
+    const uid = session?.user?.id;
+    if (!navigator.onLine && uid) {
+      await removeNoteFromCache(uid, note.id);
+      await incrementCategoryNotes(uid, note.categoryId, -1);
+      await enqueueOutbox(uid, "deleteNote", { noteId: note.id });
+      setSelectedNoteId(null);
+      qc.removeQueries({ queryKey: ["note", note.id] });
+      qc.setQueriesData({ queryKey: ["notes"], exact: false }, (old) => {
+        if (!Array.isArray(old)) return old;
+        return old.filter((n: NoteListItem) => n.id !== note.id);
+      });
+      qc.setQueryData(["categories"], (old: CategoryDTO[] | undefined) => {
+        if (!old) return old;
+        return old.map((c) =>
+          c.id === note.categoryId
+            ? {
+                ...c,
+                _count: {
+                  notes: Math.max(0, (c._count?.notes ?? 1) - 1),
+                },
+              }
+            : c,
+        );
+      });
+      return;
+    }
     const res = await fetch(`/api/notes/${note.id}`, { method: "DELETE" });
     if (res.ok) {
+      if (uid) await removeNoteFromCache(uid, note.id);
       setSelectedNoteId(null);
       qc.removeQueries({ queryKey: ["note", note.id] });
       qc.invalidateQueries({ queryKey: ["notes"] });

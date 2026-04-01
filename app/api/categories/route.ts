@@ -35,8 +35,21 @@ export async function POST(req: Request) {
     );
   }
 
+  if (parsed.data.id) {
+    const taken = await prisma.category.findFirst({
+      where: { id: parsed.data.id },
+    });
+    if (taken) {
+      return NextResponse.json({ error: "Category id already exists" }, { status: 409 });
+    }
+  }
+
   const category = await prisma.category.create({
-    data: { name: parsed.data.name, userId: user.id },
+    data: {
+      ...(parsed.data.id ? { id: parsed.data.id } : {}),
+      name: parsed.data.name,
+      userId: user.id,
+    },
     include: { _count: { select: { notes: true } } },
   });
 
